@@ -1,0 +1,9 @@
+package sample
+
+import "go.uber.org/zap"
+
+// SortFields 排序字段场景: zap 字段无序, 用于测试 -sort 参数
+func SortFields() {
+	zap.L().Info("order event", zap.String("z_trace", "abc"), zap.String("a_user", "alice"), zap.String("m_action", "buy"))
+	zap.L().Error("payment error", zap.String("reason", "timeout"), zap.String("amount", "100"), zap.String("currency", "USD"))
+}
