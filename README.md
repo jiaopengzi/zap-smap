@@ -3,7 +3,7 @@
 [![Go Version](https://img.shields.io/badge/Go-1.25.6+-blue.svg)](https://golang.org)
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
-一个用于 [zap](https://github.com/uber-go/zap) 日志库**在使用[garble](https://github.com/burrowers/garble)混淆**源码注入工具。自动在 `zap.L().Info/Error/Debug/Warn/...` 调用处注入 `zap.String("fl", "file:line")` 字段，让每条日志都能精确追溯到源码位置，不会因为混淆后导致日志出处错位。
+zap-smap(zap-source-map的缩写)一个用于 [zap](https://github.com/uber-go/zap) 日志库**在使用[garble](https://github.com/burrowers/garble)混淆**源码注入工具。自动在 `zap.L().Info/Error/Debug/Warn/...` 调用处注入 `zap.String("fl", "file:line")` 字段，让每条日志都能精确追溯到源码位置，不会因为混淆后导致日志出处错位。
 
 ## 功能特性
 
@@ -111,6 +111,7 @@ zap.L().Warn("请求信息", append([]zap.Field{zap.String("fl", "handler.go:3")
 
 | 参数 | 默认值 | 说明 |
 |---|---|---|
+| `-version`, `-v` | `false` | 输出版本信息并退出 |
 | `-path` | `.` | 要扫描的文件或目录 |
 | `-field` | `fl` | 要注入的字段名 |
 | `-del` | `""` | 要删除的字段名（纯删除，不注入新字段） |

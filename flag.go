@@ -27,7 +27,13 @@ var (
 	excludeFlag = flag.String("exclude", "", "以逗号分隔的要排除的目录或文件路径")
 	positionFlg = flag.Int("position", -1, "插入字段的位置索引(0-based)相对于 field 参数列表(跳过 msg); 0=第一个 field 之前, 默认-1等同于0")
 	sortFlg     = flag.Bool("sort", false, "按字段键的字母顺序排列 zap 字段")
+	versionFlg  = flag.Bool("version", false, "输出版本信息并退出")
 )
+
+func init() {
+	// 注册 -v 作为 -version 的简写
+	flag.BoolVar(versionFlg, "v", false, "输出版本信息并退出(同 -version)")
+}
 
 // excludeList 用户指定的排除路径列表
 var excludeList []string

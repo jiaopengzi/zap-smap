@@ -45,6 +45,12 @@ func main() {
 	// 解析命令行参数
 	flag.Parse()
 
+	// 输出版本信息
+	if *versionFlg {
+		printVersion()
+		os.Exit(0)
+	}
+
 	// 检查参数冲突
 	if err := checkFlagConflicts(); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
@@ -142,4 +148,11 @@ func applyBuildTime(v string) {
 	if isDefaultValue(BuildTime) && v != "" {
 		BuildTime = v
 	}
+}
+
+// printVersion 输出版本、Commit 和构建时间信息
+func printVersion() {
+	fmt.Printf("zap-smap version %s\n", Version)
+	fmt.Printf("commit: %s\n", Commit)
+	fmt.Printf("built:  %s\n", BuildTime)
 }
