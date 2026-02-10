@@ -12,13 +12,23 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"sort"
 	"strings"
+
+	"github.com/jiaopengzi/go-utils"
 )
 
 // applyPatchIfModified 将修改写回文件或打印预览, 基于 -write 标志。
+// 会先比较新旧内容, 只有实际发生变化的文件才输出 [PATCH] 并执行写回或预览。
 func applyPatchIfModified(path string, modified bool, out string, modifiedLines []int, baseDir string) error {
 	if !modified {
+		return nil
+	}
+
+	// 读取原文件内容, 与生成内容对比; 无变化则跳过
+	original, err := utils.ReadFile(filepath.Clean(path))
+	if err == nil && string(original) == out {
 		return nil
 	}
 
@@ -37,7 +47,7 @@ func applyPatchIfModified(path string, modified bool, out string, modifiedLines 
 			fmt.Fprintf(os.Stderr, "warn: gofmt %s failed: %v\n", rel, err)
 		}
 	} else {
-		// dry-run: 打印每个注入点附近的片段，使用相对于 baseDir 的路径
+		// dry-run: 打印预览片段
 		printPreview(out, rel, modifiedLines)
 	}
 
@@ -100,7 +110,7 @@ func runGoFmt(path string) error {
 		return nil
 	}
 
-	cmd := exec.Command(gofmt, "-w", path)
+	cmd := exec.Command(gofmt, "-w", filepath.Clean(path)) // #nosec G204 -- gofmt 路径来自 LookPath, path 为已知文件路径
 	cmd.Stderr = os.Stderr
 
 	return cmd.Run()

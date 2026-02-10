@@ -140,13 +140,25 @@ func reportVerifyForPath(path string, fSet *token.FileSet, modulePath, baseDir s
 	return total, missing, mismatch, issues, nil
 }
 
-// printVerifySummary 打印汇总报告
-func printVerifySummary(totalAll, missingAll, mismatchAll int) {
+// printVerifySummary 打印汇总报告, 包括存在问题的文件列表。
+//   - totalAll, 目标日志调用总数。
+//   - missingAll, 缺失注入的调用数。
+//   - mismatchAll, 注入值不匹配的调用数。
+//   - issueFiles, 存在问题的文件列表。
+func printVerifySummary(totalAll, missingAll, mismatchAll int, issueFiles []string) {
 	fmt.Printf("\n===== VERIFY SUMMARY =====\n")
 	fmt.Printf("total calls: %d\nmissing: %d\nmismatch: %d\n", totalAll, missingAll, mismatchAll)
 
+	if len(issueFiles) > 0 {
+		fmt.Printf("\nfiles with issues (%d):\n", len(issueFiles))
+
+		for _, f := range issueFiles {
+			fmt.Printf("  \u2717 %s\n", f)
+		}
+	}
+
 	if missingAll == 0 && mismatchAll == 0 {
-		fmt.Println("All injections look correct.")
+		fmt.Println("\nAll injections look correct.")
 	}
 }
 

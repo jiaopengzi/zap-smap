@@ -78,33 +78,23 @@ func runPatchWalk(target string, fSet *token.FileSet, modulePath, baseDir string
 func runVerifyWalk(target string, fSet *token.FileSet, modulePath, baseDir string) error {
 	var totalAll, missingAll, mismatchAll int
 
+	// 收集有问题的文件路径
+	var issueFiles []string
+
 	err := filepath.WalkDir(target, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
 
 		if d.IsDir() {
-			if shouldSkipDir(path) {
-				return filepath.SkipDir
-			}
-
-			return nil
+			return handleVerifyDir(path)
 		}
 
-		if shouldSkipFile(path) {
-			return nil
-		}
-
-		total, missing, mismatch, _, err := reportVerifyForPath(path, fSet, modulePath, baseDir)
-		if err != nil {
-			return err
-		}
-
-		if total > 0 {
-			totalAll += total
-			missingAll += missing
-			mismatchAll += mismatch
-		}
+		t, m, mm, files := verifyWalkFile(path, fSet, modulePath, baseDir)
+		totalAll += t
+		missingAll += m
+		mismatchAll += mm
+		issueFiles = append(issueFiles, files...)
 
 		return nil
 	})
@@ -113,9 +103,39 @@ func runVerifyWalk(target string, fSet *token.FileSet, modulePath, baseDir strin
 		return err
 	}
 
-	printVerifySummary(totalAll, missingAll, mismatchAll)
+	printVerifySummary(totalAll, missingAll, mismatchAll, issueFiles)
 
 	return nil
+}
+
+// handleVerifyDir 判断目录是否应当跳过
+func handleVerifyDir(path string) error {
+	if shouldSkipDir(path) {
+		return filepath.SkipDir
+	}
+
+	return nil
+}
+
+// verifyWalkFile 对单个文件执行 verify 并返回统计数据及问题文件列表
+func verifyWalkFile(path string, fSet *token.FileSet, modulePath, baseDir string) (int, int, int, []string) {
+	if shouldSkipFile(path) {
+		return 0, 0, 0, nil
+	}
+
+	total, missing, mismatch, issues, err := reportVerifyForPath(path, fSet, modulePath, baseDir)
+	if err != nil || total == 0 {
+		return 0, 0, 0, nil
+	}
+
+	var files []string
+
+	if len(issues) > 0 {
+		rel := relPath(path, baseDir)
+		files = append(files, rel)
+	}
+
+	return total, missing, mismatch, files
 }
 
 // shouldSkipDir 判断目录路径是否应当跳过(例如 vendor/.git 等), 支持 -exclude
