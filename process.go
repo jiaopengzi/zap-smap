@@ -11,6 +11,7 @@ package main
 import (
 	"fmt"
 	"go/ast"
+	"go/format"
 	"go/parser"
 	"go/printer"
 	"go/token"
@@ -87,6 +88,12 @@ func processFile(path string, fSet *token.FileSet, modulePath string, baseDir st
 		// 导致注入的行号与实际行号不符。重新解析输出, 校正行号。
 		if *delFlg == "" {
 			out = correctLineNumbers(out, path, modulePath, baseDir)
+		}
+
+		// 使用 go/format 格式化输出, 保证与 gofmt 一致
+		formatted, err := format.Source([]byte(out))
+		if err == nil {
+			out = string(formatted)
 		}
 
 		return true, out, modifiedLines, nil
