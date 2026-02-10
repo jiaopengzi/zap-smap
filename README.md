@@ -21,24 +21,32 @@
 
 ## 安装
 
-### 从源码构建
+### 方式一：下载预编译二进制（推荐）
+
+从 [Releases](https://github.com/jiaopengzi/zap-smap/releases) 页面下载对应平台的二进制文件。
+
+> 预编译版本包含完整的版本信息（Version、Commit、BuildTime）。
+
+### 方式二：Go Install
 
 ```bash
 go install github.com/jiaopengzi/zap-smap@latest
 ```
 
-### 从 Release 下载
+> 此方式安装的版本号来自 Go 模块版本（如 v0.2.0），Commit 和 BuildTime 来自 VCS 信息。
 
-前往 [Releases](https://github.com/jiaopengzi/zap-smap/releases) 页面下载预编译二进制文件。
-
-### 本地编译
+### 方式三：源码编译（完整版本信息）
 
 ```bash
-# 使用 Make（Linux/macOS）
-make all
+git clone https://github.com/jiaopengzi/zap-smap.git
+cd zap-smap
 
-# 使用 PowerShell（Windows）
-.\run.ps1   # 选择编号 1 或 2
+# Windows (PowerShell)
+.\run.ps1
+# 选择 2 - 构建 Windows 二进制
+
+# Linux/macOS
+make build-linux   # 或 build-macos
 ```
 
 ## 快速开始
