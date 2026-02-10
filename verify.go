@@ -14,11 +14,18 @@ import (
 	"go/parser"
 	"go/token"
 	"os"
-	"strconv"
 	"strings"
 
 	"github.com/jiaopengzi/go-utils"
 )
+
+// verifyResult 校验单次调用的统计结果
+type verifyResult struct {
+	total    int
+	missing  int
+	mismatch int
+	issues   []string
+}
 
 // verifyFile 在不修改文件的情况下校验每个 zap 日志调用的注入字段是否存在且值是否正确
 func verifyFile(path string, fSet *token.FileSet, modulePath string, baseDir string) (int, int, int, []string, error) {
@@ -42,18 +49,20 @@ func verifyFile(path string, fSet *token.FileSet, modulePath string, baseDir str
 		return 0, 0, 0, nil, nil
 	}
 
-	// 初始化统计计数
-	total := 0
-	missing := 0
-	mismatch := 0
-
-	var issues []string
-
 	// 收集文件中每个函数的范围信息, 用于后续定位调用处所属的函数(以便构造完整函数路径)
 	fns := collectFuncRanges(file, fSet)
 
-	// 遍历 AST 节点:定位所有函数调用并委托给 verifyCallExpr 完成单次调用的校验
-	// verifyCallExpr 会返回是否为目标日志调用以及是否存在问题类型(缺失或不匹配)
+	// 遍历 AST 节点, 收集校验结果
+	vr := verifyFileInspect(file, fSet, fns, modulePath, baseDir)
+
+	return vr.total, vr.missing, vr.mismatch, vr.issues, nil
+}
+
+// verifyFileInspect 遍历 AST 节点, 定位所有函数调用并委托给 verifyCallExpr 完成单次调用的校验,
+// 返回汇总的校验结果
+func verifyFileInspect(file *ast.File, fSet *token.FileSet, fns []fnRange, modulePath, baseDir string) verifyResult {
+	var vr verifyResult
+
 	ast.Inspect(file, func(n ast.Node) bool {
 		ce, ok := n.(*ast.CallExpr)
 		if !ok {
@@ -72,25 +81,25 @@ func verifyFile(path string, fSet *token.FileSet, modulePath string, baseDir str
 		}
 
 		// 统计目标日志调用总数
-		total++
+		vr.total++
 
 		// 如果 verifyCallExpr 返回了 issue, 则记录并根据问题类型更新相应计数器
 		if issue != "" {
-			issues = append(issues, issue)
+			vr.issues = append(vr.issues, issue)
 
 			if isMissing {
-				missing++
+				vr.missing++
 			}
 
 			if isMismatch {
-				mismatch++
+				vr.mismatch++
 			}
 		}
 
 		return true
 	})
 
-	return total, missing, mismatch, issues, nil
+	return vr
 }
 
 // verifyAndHandleSingleFile 对单个文件执行 verify 并处理结果
@@ -160,97 +169,50 @@ func verifyCallExpr(
 
 	// ellipsis 路径: 检查 append 包裹内部的注入字段
 	if ce.Ellipsis.IsValid() {
-		lastIdx := len(ce.Args) - 1
-		expandedArg := ce.Args[lastIdx]
-
-		_, zapCall, _ := findEllipsisFieldCall(expandedArg, *fieldFlg)
-
-		if zapCall == nil {
-			// 缺失: 展开参数未被 append([]zap.Field{zap.String("fl", "...")}, x...) 包裹
-			return true, fmt.Sprintf("%s:%d: zap.%s missing field '%s' (ellipsis call), expected='%s'", rel, pos.Line, method, *fieldFlg, expected), true, false
-		}
-
-		// 检查值是否匹配
-		if len(zapCall.Args) < 2 {
-			return true, fmt.Sprintf("%s:%d: zap.%s field '%s' has insufficient args in append wrapper", rel, pos.Line, method, *fieldFlg), false, false
-		}
-
-		bl, ok := zapCall.Args[1].(*ast.BasicLit)
-		if !ok {
-			return true, fmt.Sprintf("%s:%d: zap.%s field '%s' value is not a string literal", rel, pos.Line, method, *fieldFlg), false, false
-		}
-
-		var actual string
-		if s, err := strconv.Unquote(bl.Value); err == nil {
-			actual = s
-		} else {
-			actual = strings.Trim(bl.Value, "\"")
-		}
-
-		if actual != expected {
-			return true, fmt.Sprintf("%s:%d: zap.%s field '%s' mismatch actual='%s' expected='%s'", rel, pos.Line, method, *fieldFlg, actual, expected), false, true
-		}
-
-		return true, "", false, false
+		return verifyEllipsisCall(ce, rel, pos, method, expected)
 	}
 
-	// 非 ellipsis 路径: 原有逻辑
+	// 非 ellipsis 路径
+	return verifyNonEllipsisCall(ce, rel, pos, method, expected, foundIndex, baseDir)
+}
+
+// verifyEllipsisCall 校验 ellipsis 展开调用中的注入字段
+// 返回: shouldCount, issue, isMissing, isMismatch
+func verifyEllipsisCall(ce *ast.CallExpr, rel string, pos token.Position, method, expected string) (bool, string, bool, bool) {
+	lastIdx := len(ce.Args) - 1
+	expandedArg := ce.Args[lastIdx]
+
+	_, zapCall, _ := findEllipsisFieldCall(expandedArg, *fieldFlg)
+
+	if zapCall == nil {
+		// 缺失: 展开参数未被 append([]zap.Field{zap.String("fl", "...")}, x...) 包裹
+		return true, fmt.Sprintf("%s:%d: zap.%s missing field '%s' (ellipsis call), expected='%s'", rel, pos.Line, method, *fieldFlg, expected), true, false
+	}
+
+	// 检查值是否匹配
+	if len(zapCall.Args) < 2 {
+		return true, fmt.Sprintf("%s:%d: zap.%s field '%s' has insufficient args in append wrapper", rel, pos.Line, method, *fieldFlg), false, false
+	}
+
+	bl, ok := zapCall.Args[1].(*ast.BasicLit)
+	if !ok {
+		return true, fmt.Sprintf("%s:%d: zap.%s field '%s' value is not a string literal", rel, pos.Line, method, *fieldFlg), false, false
+	}
+
+	actual := unquoteLiteral(bl.Value)
+
+	if actual != expected {
+		return true, fmt.Sprintf("%s:%d: zap.%s field '%s' mismatch actual='%s' expected='%s'", rel, pos.Line, method, *fieldFlg, actual, expected), false, true
+	}
+
+	return true, "", false, false
+}
+
+// verifyNonEllipsisCall 校验非 ellipsis 调用中的注入字段
+// 返回: shouldCount, issue, isMissing, isMismatch
+func verifyNonEllipsisCall(ce *ast.CallExpr, rel string, pos token.Position, method, expected string, foundIndex int, baseDir string) (bool, string, bool, bool) {
 	// 收集现有字段列表用于更友好的错误提示
-	var existingFields []string
-
-	for _, a := range ce.Args[1:] {
-		call, ok := a.(*ast.CallExpr)
-		if !ok {
-			continue
-		}
-
-		funSel, ok := call.Fun.(*ast.SelectorExpr)
-		if !ok {
-			continue
-		}
-
-		id, ok := funSel.X.(*ast.Ident)
-		if !ok || id.Name != zapIdent {
-			continue
-		}
-
-		if len(call.Args) == 0 {
-			continue
-		}
-
-		// 尝试解析 key/value
-		var key string
-
-		if bl, ok := call.Args[0].(*ast.BasicLit); ok {
-			if s, err := strconv.Unquote(bl.Value); err == nil {
-				key = s
-			} else {
-				key = strings.Trim(bl.Value, "\"")
-			}
-		}
-
-		var val string
-
-		if len(call.Args) > 1 {
-			if bl2, ok := call.Args[1].(*ast.BasicLit); ok {
-				if s, err := strconv.Unquote(bl2.Value); err == nil {
-					val = s
-				} else {
-					val = strings.Trim(bl2.Value, "\"")
-				}
-			} else {
-				val = "<non-literal>"
-			}
-		} else {
-			val = "<missing>"
-		}
-
-		if key != "" {
-			existingFields = append(existingFields, fmt.Sprintf("%s=%s", key, val))
-		}
-	}
-
-	// 非 ellipsis: method 已经在上方声明，直接使用
+	existingFields := collectExistingFields(ce)
 
 	if foundIndex < 0 {
 		existStr := strings.Join(existingFields, ", ")
@@ -265,7 +227,7 @@ func verifyCallExpr(
 			return true, fmt.Sprintf("%s:%d: zap.%s field '%s' mismatch actual='%s' expected='%s', existing fields: [%s]", rel, pos.Line, method, *fieldFlg, actual, expected, existStr), false, true
 		}
 
-		// 其他类型的问题（非值不匹配）
+		// 其他类型的问题(非值不匹配)
 		// 从 issue 中提取简短描述
 		parts := strings.SplitN(issue, ": ", 2)
 		detail := issue
@@ -288,112 +250,75 @@ func verifyCallExpr(
 //   - foundIndex: 在 ce.Args 中该字段参数的索引
 //   - expected: 期望的字符串值(由 buildInjectedValue 构造)
 //   - pos: 调用位置(用于构造文件:行号的错误信息)
+//   - baseDir: 仓库根目录
 //
 // 返回:
 //   - issue: 若非空表示存在问题, 包含文件与行号及错误描述; 为空表示校验通过
 //   - isMismatch: 如果问题类型为值不匹配(actual != expected)则为 true, 其他错误类型返回 false
+//   - actual: 实际的字段值
+//   - existing: 现有字段列表
 func verifyExistingField(ce *ast.CallExpr, foundIndex int, expected string, pos token.Position, baseDir string) (string, bool, string, []string) {
-	// 先收集现有字段列表
-	var existing []string
+	// 收集现有字段列表
+	existing := collectExistingFields(ce)
 
-	for _, a := range ce.Args[1:] {
-		call, ok := a.(*ast.CallExpr)
-		if !ok {
-			continue
-		}
+	// 校验字段表达式是否为 zap.String 且值正确
+	issue, isMismatch, actual := validateZapStringField(ce, foundIndex, expected, pos, baseDir)
 
-		funSel, ok := call.Fun.(*ast.SelectorExpr)
-		if !ok {
-			continue
-		}
+	return issue, isMismatch, actual, existing
+}
 
-		id, ok := funSel.X.(*ast.Ident)
-		if !ok || id.Name != zapIdent {
-			continue
-		}
-
-		if len(call.Args) == 0 {
-			continue
-		}
-
-		var key string
-
-		if bl, ok := call.Args[0].(*ast.BasicLit); ok {
-			if s, err := strconv.Unquote(bl.Value); err == nil {
-				key = s
-			} else {
-				key = strings.Trim(bl.Value, "\"")
-			}
-		}
-
-		var val string
-
-		if len(call.Args) > 1 {
-			if bl2, ok := call.Args[1].(*ast.BasicLit); ok {
-				if s, err := strconv.Unquote(bl2.Value); err == nil {
-					val = s
-				} else {
-					val = strings.Trim(bl2.Value, "\"")
-				}
-			} else {
-				val = "<non-literal>"
-			}
-		} else {
-			val = "<missing>"
-		}
-
-		if key != "" {
-			existing = append(existing, fmt.Sprintf("%s=%s", key, val))
-		}
-	}
+// validateZapStringField 校验 ce.Args[foundIndex] 是否为 zap.String(key, value) 调用,
+// 并检查 value 是否与 expected 一致
+//
+// 返回:
+//   - issue: 若非空表示存在问题
+//   - isMismatch: 问题类型是否为值不匹配
+//   - actual: 实际的字段值
+func validateZapStringField(ce *ast.CallExpr, foundIndex int, expected string, pos token.Position, baseDir string) (string, bool, string) {
+	rel := relPath(pos.Filename, baseDir)
 
 	// 1) 确认该参数是一个调用表达式 (例如: zap.String(...))
 	call, ok := ce.Args[foundIndex].(*ast.CallExpr)
 	if !ok {
-		rel := relPath(pos.Filename, baseDir)
-		return fmt.Sprintf("%s:%d: field arg not a call expression", rel, pos.Line), true, "", existing
+		return fmt.Sprintf("%s:%d: field arg not a call expression", rel, pos.Line), true, ""
 	}
 
 	// 2) 确认调用的函数是一个 SelectorExpr (例如 zap.String)
 	funSel, ok := call.Fun.(*ast.SelectorExpr)
 	if !ok {
-		rel := relPath(pos.Filename, baseDir)
-		return fmt.Sprintf("%s:%d: unexpected expression for field arg", rel, pos.Line), true, "", existing
+		return fmt.Sprintf("%s:%d: unexpected expression for field arg", rel, pos.Line), true, ""
 	}
 
-	// 3) 确认接收者为 `zap` 且方法名为 `String`
-	id, ok := funSel.X.(*ast.Ident)
-	if !ok || id.Name != zapIdent || funSel.Sel.Name != zapMethodString {
-		rel := relPath(pos.Filename, baseDir)
-		return fmt.Sprintf("%s:%d: expected zap.String call for field", rel, pos.Line), true, "", existing
+	// 3) 确认接收者为 zap 且方法名为 String
+	if !isZapStringSelector(funSel) {
+		return fmt.Sprintf("%s:%d: expected zap.String call for field", rel, pos.Line), true, ""
 	}
 
 	// 4) zap.String 至少应有两个参数 (key, value)
 	if len(call.Args) <= 1 {
-		rel := relPath(pos.Filename, baseDir)
-		return fmt.Sprintf("%s:%d: zap.String has insufficient args", rel, pos.Line), true, "", existing
+		return fmt.Sprintf("%s:%d: zap.String has insufficient args", rel, pos.Line), true, ""
 	}
 
 	// 5) 第二个参数应为字符串字面量
 	bl, ok := call.Args[1].(*ast.BasicLit)
 	if !ok {
-		rel := relPath(pos.Filename, baseDir)
-		return fmt.Sprintf("%s:%d: mismatched type for field, expected basic literal", rel, pos.Line), true, "", existing
+		return fmt.Sprintf("%s:%d: mismatched type for field, expected basic literal", rel, pos.Line), true, ""
 	}
 
 	// 6) 解析字面量为字符串并与期望值比较
-	var actual string
-	if s, err := strconv.Unquote(bl.Value); err == nil {
-		actual = s
-	} else {
-		actual = strings.Trim(bl.Value, "\"")
-	}
+	actual := unquoteLiteral(bl.Value)
 
 	if actual != expected {
-		rel := relPath(pos.Filename, baseDir)
-		return fmt.Sprintf("%s:%d: mismatch actual='%s' expected='%s'", rel, pos.Line, actual, expected), true, actual, existing
+		return fmt.Sprintf("%s:%d: mismatch actual='%s' expected='%s'", rel, pos.Line, actual, expected), true, actual
 	}
 
 	// 校验通过
-	return "", false, actual, existing
+	return "", false, actual
+}
+
+// isZapStringSelector 判断 SelectorExpr 是否为 zap.String
+func isZapStringSelector(sel *ast.SelectorExpr) bool {
+	id, ok := sel.X.(*ast.Ident)
+
+	return ok && id.Name == zapIdent && sel.Sel.Name == zapMethodString
 }

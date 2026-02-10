@@ -12,7 +12,7 @@
 //
 // 查看帮助:
 //
-// `go run ./tools/log_inject_file_line -h`
+// `go run . -h`
 //
 //	默认是 dry-run(不修改文件, 展示预览), 加上 -write 才会写回文件
 package main

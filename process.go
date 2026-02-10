@@ -112,30 +112,7 @@ func handleCallExpr(ce *ast.CallExpr, sel *ast.SelectorExpr, fSet *token.FileSet
 
 	// 如果指定了要删除的字段, 执行纯删除操作后立即返回, 不再注入新字段
 	if *delFlg != "" {
-		deleted := false
-
-		if ce.Ellipsis.IsValid() {
-			// ellipsis 调用: 检查展开参数是否被 append([]zap.Field{zap.String(delKey, ...)}, x...) 包裹, 解包还原
-			lastIdx := len(ce.Args) - 1
-			if _, _, origArg := findEllipsisFieldCall(ce.Args[lastIdx], *delFlg); origArg != nil {
-				ce.Args[lastIdx] = origArg
-				deleted = true
-			}
-		} else {
-			if idxDel := findExistingFieldIndex(ce, *delFlg); idxDel >= 0 {
-				if idxDel >= 0 && idxDel < len(ce.Args) {
-					ce.Args = append(ce.Args[:idxDel], ce.Args[idxDel+1:]...)
-					deleted = true
-				}
-			}
-		}
-
-		if deleted {
-			pos := fSet.Position(ce.Lparen)
-			return true, pos.Line
-		}
-
-		return false, 0
+		return handleDeleteField(ce, fSet)
 	}
 
 	// 使用 analyzeCallExpr 收集共享信息
@@ -145,30 +122,65 @@ func handleCallExpr(ce *ast.CallExpr, sel *ast.SelectorExpr, fSet *token.FileSet
 	}
 
 	// ellipsis 路径: 使用 append([]zap.Field{zap.String("fl", "...")}, expandedArg...) 包裹
-	// 确保注入字段在切片第一位
 	if ce.Ellipsis.IsValid() {
+		return handleEllipsisInjection(ce, expected, pos)
+	}
+
+	// 非 ellipsis 路径: 直接插入或更新参数
+	return handleNonEllipsisInsert(ce, expected, pos, foundIndex)
+}
+
+// handleDeleteField 处理删除字段逻辑, 返回是否修改以及修改所在的行号
+func handleDeleteField(ce *ast.CallExpr, fSet *token.FileSet) (bool, int) {
+	deleted := false
+
+	if ce.Ellipsis.IsValid() {
+		// ellipsis 调用: 检查展开参数是否被 append([]zap.Field{zap.String(delKey, ...)}, x...) 包裹, 解包还原
 		lastIdx := len(ce.Args) - 1
-		expandedArg := ce.Args[lastIdx]
-
-		// 检查是否已包裹: append([]zap.Field{zap.String("fl", "...")}, x...) → 更新值
-		if _, zapCall, _ := findEllipsisFieldCall(expandedArg, *fieldFlg); zapCall != nil {
-			if len(zapCall.Args) >= 2 {
-				oldPos := zapCall.Args[1].Pos()
-				zapCall.Args[1] = &ast.BasicLit{Kind: token.STRING, Value: strconv.Quote(expected), ValuePos: oldPos}
-			}
-
-			return true, pos.Line
+		if _, _, origArg := findEllipsisFieldCall(ce.Args[lastIdx], *delFlg); origArg != nil {
+			ce.Args[lastIdx] = origArg
+			deleted = true
 		}
+	} else {
+		if idxDel := findExistingFieldIndex(ce, *delFlg); idxDel >= 0 && idxDel < len(ce.Args) {
+			ce.Args = append(ce.Args[:idxDel], ce.Args[idxDel+1:]...)
+			deleted = true
+		}
+	}
 
-		// 未包裹: 用 append([]zap.Field{newArg}, expandedArg...) 包裹, 注入字段在切片第一位
-		newArg := makeZapStringArg(expected)
-		wrapExpr := makeEllipsisAppend(newArg, expandedArg)
-		ce.Args[lastIdx] = wrapExpr
+	if deleted {
+		pos := fSet.Position(ce.Lparen)
+		return true, pos.Line
+	}
+
+	return false, 0
+}
+
+// handleEllipsisInjection 处理 ellipsis 场景的字段注入, 返回是否修改以及修改所在的行号
+func handleEllipsisInjection(ce *ast.CallExpr, expected string, pos token.Position) (bool, int) {
+	lastIdx := len(ce.Args) - 1
+	expandedArg := ce.Args[lastIdx]
+
+	// 检查是否已包裹: append([]zap.Field{zap.String("fl", "...")}, x...) → 更新值
+	if _, zapCall, _ := findEllipsisFieldCall(expandedArg, *fieldFlg); zapCall != nil {
+		if len(zapCall.Args) >= 2 {
+			oldPos := zapCall.Args[1].Pos()
+			zapCall.Args[1] = &ast.BasicLit{Kind: token.STRING, Value: strconv.Quote(expected), ValuePos: oldPos}
+		}
 
 		return true, pos.Line
 	}
 
-	// 非 ellipsis 路径: 直接插入或更新参数
+	// 未包裹: 用 append([]zap.Field{newArg}, expandedArg...) 包裹, 注入字段在切片第一位
+	newArg := makeZapStringArg(expected)
+	wrapExpr := makeEllipsisAppend(newArg, expandedArg)
+	ce.Args[lastIdx] = wrapExpr
+
+	return true, pos.Line
+}
+
+// handleNonEllipsisInsert 处理非 ellipsis 场景的字段插入或更新, 返回是否修改以及修改所在的行号
+func handleNonEllipsisInsert(ce *ast.CallExpr, expected string, pos token.Position, foundIndex int) (bool, int) {
 	newArg := makeZapStringArg(expected)
 
 	// 设置新节点位置, 防止 go/printer 将相邻注释吸入参数内部
@@ -176,49 +188,54 @@ func handleCallExpr(ce *ast.CallExpr, sel *ast.SelectorExpr, fSet *token.FileSet
 
 	if foundIndex >= 0 {
 		ce.Args[foundIndex] = newArg
-	} else {
-		old := ce.Args
+		return true, pos.Line
+	}
 
-		// 计算插入索引: position 基于 field 参数列表(跳过第一个 msg 参数)
-		// position=0 表示插入到第一个 field 之前(即 msg 之后), 默认(-1)等同于 0
-		insertIdx := 1 // AST 索引 1 = msg 之后
+	// 计算插入索引: position 基于 field 参数列表(跳过第一个 msg 参数)
+	// position=0 表示插入到第一个 field 之前(即 msg 之后), 默认(-1)等同于 0
+	insertArgs(ce, newArg)
 
-		if *positionFlg >= 0 {
-			// field 索引 + 1(跳过 msg) = AST 索引
-			astIdx := *positionFlg + 1
-			if astIdx > len(old) {
-				insertIdx = len(old)
-			} else {
-				insertIdx = astIdx
-			}
-		}
-
-		// 插入 newArg 到 insertIdx
-		switch {
-		case insertIdx <= 0:
-			newArgs := make([]ast.Expr, 0, len(old)+1)
-			newArgs = append(newArgs, newArg)
-			newArgs = append(newArgs, old...)
-			ce.Args = newArgs
-		case insertIdx >= len(old):
-			old = append(old, newArg)
-			ce.Args = old
-		default:
-			newArgs := make([]ast.Expr, 0, len(old)+1)
-			newArgs = append(newArgs, old[:insertIdx]...)
-			newArgs = append(newArgs, newArg)
-			newArgs = append(newArgs, old[insertIdx:]...)
-			ce.Args = newArgs
-		}
-
-		// 如果要求按字母排序 zap 字段，则重建参数列表：保持第一个参数(通常是消息)
-		// 然后将所有 zap 字段按照 key 排序，剩余非 zap 字段保持原序追加
-		if *sortFlg {
-			sortZapFields(ce)
-		}
+	// 如果要求按字母排序 zap 字段, 则对参数列表重新排序
+	if *sortFlg {
+		sortZapFields(ce)
 	}
 
 	return true, pos.Line
+}
+
+// insertArgs 将 newArg 插入到 ce.Args 中由 positionFlg 决定的位置
+func insertArgs(ce *ast.CallExpr, newArg ast.Expr) {
+	old := ce.Args
+
+	insertIdx := 1 // AST 索引 1 = msg 之后
+
+	if *positionFlg >= 0 {
+		// field 索引 + 1(跳过 msg) = AST 索引
+		astIdx := *positionFlg + 1
+		if astIdx > len(old) {
+			insertIdx = len(old)
+		} else {
+			insertIdx = astIdx
+		}
+	}
+
+	// 插入 newArg 到 insertIdx
+	switch {
+	case insertIdx <= 0:
+		newArgs := make([]ast.Expr, 0, len(old)+1)
+		newArgs = append(newArgs, newArg)
+		newArgs = append(newArgs, old...)
+		ce.Args = newArgs
+	case insertIdx >= len(old):
+		old = append(old, newArg)
+		ce.Args = old
+	default:
+		newArgs := make([]ast.Expr, 0, len(old)+1)
+		newArgs = append(newArgs, old[:insertIdx]...)
+		newArgs = append(newArgs, newArg)
+		newArgs = append(newArgs, old[insertIdx:]...)
+		ce.Args = newArgs
+	}
 }
 
 // makeZapStringArg 构造 zap.String(...) 表达式
@@ -236,44 +253,39 @@ func makeZapStringArg(v string) ast.Expr {
 func findExistingFieldIndex(ce *ast.CallExpr, key string) int {
 	// 遍历传入参数(跳过第一个参数), 使用短路 continue 降低嵌套层级
 	for i, a := range ce.Args[1:] {
-		call, ok := a.(*ast.CallExpr)
-		if !ok {
-			continue
-		}
-
-		funSel, ok := call.Fun.(*ast.SelectorExpr)
-		if !ok {
-			continue
-		}
-
-		id, ok := funSel.X.(*ast.Ident)
-		if !ok || id.Name != zapIdent {
-			continue
-		}
-
-		// 放宽匹配：只要是 zap.<Something>(<key>, ...) 且第一个参数为字符串字面量且等于 key，就视为匹配。
-		if len(call.Args) == 0 {
-			continue
-		}
-
-		bl, ok := call.Args[0].(*ast.BasicLit)
-		if !ok {
-			continue
-		}
-
-		var lit string
-		if s, err := strconv.Unquote(bl.Value); err == nil {
-			lit = s
-		} else {
-			lit = strings.Trim(bl.Value, "\"")
-		}
-
-		if lit == key {
+		if matchesZapFieldKey(a, key) {
 			return i + 1
 		}
 	}
 
 	return -1
+}
+
+// matchesZapFieldKey 判断参数表达式是否为 zap.<Method>(key, ...) 调用且第一个参数为字符串字面量等于 key
+func matchesZapFieldKey(a ast.Expr, key string) bool {
+	call, ok := a.(*ast.CallExpr)
+	if !ok {
+		return false
+	}
+
+	funSel, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok {
+		return false
+	}
+
+	id, ok := funSel.X.(*ast.Ident)
+	if !ok || id.Name != zapIdent {
+		return false
+	}
+
+	// 放宽匹配: 只要是 zap.<Something>(<key>, ...) 且第一个参数为字符串字面量且等于 key, 就视为匹配
+	if len(call.Args) == 0 {
+		return false
+	}
+
+	lit := parseLitKey(call.Args[0])
+
+	return lit == key
 }
 
 // makeEllipsisAppend 构造 append([]zap.Field{zapStringArg}, expandedArg...) 表达式。
@@ -316,16 +328,7 @@ func setExprPos(e ast.Expr, pos token.Pos) {
 
 	switch v := e.(type) {
 	case *ast.CallExpr:
-		if v.Fun != nil {
-			setExprPos(v.Fun, pos)
-		}
-
-		v.Lparen = pos
-		v.Rparen = pos
-
-		for _, a := range v.Args {
-			setExprPos(a, pos)
-		}
+		setCallExprPos(v, pos)
 	case *ast.BasicLit:
 		v.ValuePos = pos
 	case *ast.Ident:
@@ -334,22 +337,46 @@ func setExprPos(e ast.Expr, pos token.Pos) {
 		setExprPos(v.X, pos)
 		v.Sel.NamePos = pos
 	case *ast.CompositeLit:
-		if v.Type != nil {
-			setExprPos(v.Type, pos)
-		}
-
-		v.Lbrace = pos
-		v.Rbrace = pos
-
-		for _, el := range v.Elts {
-			setExprPos(el, pos)
-		}
+		setCompositeLitPos(v, pos)
 	case *ast.ArrayType:
-		v.Lbrack = pos
+		setArrayTypePos(v, pos)
+	}
+}
 
-		if v.Elt != nil {
-			setExprPos(v.Elt, pos)
-		}
+// setCallExprPos 设置 CallExpr 节点及其子节点的位置
+func setCallExprPos(v *ast.CallExpr, pos token.Pos) {
+	if v.Fun != nil {
+		setExprPos(v.Fun, pos)
+	}
+
+	v.Lparen = pos
+	v.Rparen = pos
+
+	for _, a := range v.Args {
+		setExprPos(a, pos)
+	}
+}
+
+// setCompositeLitPos 设置 CompositeLit 节点及其子节点的位置
+func setCompositeLitPos(v *ast.CompositeLit, pos token.Pos) {
+	if v.Type != nil {
+		setExprPos(v.Type, pos)
+	}
+
+	v.Lbrace = pos
+	v.Rbrace = pos
+
+	for _, el := range v.Elts {
+		setExprPos(el, pos)
+	}
+}
+
+// setArrayTypePos 设置 ArrayType 节点及其子节点的位置
+func setArrayTypePos(v *ast.ArrayType, pos token.Pos) {
+	v.Lbrack = pos
+
+	if v.Elt != nil {
+		setExprPos(v.Elt, pos)
 	}
 }
 
@@ -511,12 +538,24 @@ func correctLineNumbers(output string, path string, modulePath string, baseDir s
 
 	fns := collectFuncRanges(file2, fSet2)
 
-	type lineEdit struct {
-		offset int
-		length int
-		newVal string
+	edits := collectLineEdits(file2, fSet2, fns, modulePath, baseDir)
+
+	if len(edits) == 0 {
+		return output
 	}
 
+	return applyLineEdits(output, edits)
+}
+
+// lineEdit 描述一次行号修正替换
+type lineEdit struct {
+	offset int
+	length int
+	newVal string
+}
+
+// collectLineEdits 遍历 AST 收集所有需要修正行号的编辑项
+func collectLineEdits(file2 *ast.File, fSet2 *token.FileSet, fns []fnRange, modulePath, baseDir string) []lineEdit {
 	var edits []lineEdit
 
 	ast.Inspect(file2, func(n ast.Node) bool {
@@ -535,29 +574,7 @@ func correctLineNumbers(output string, path string, modulePath string, baseDir s
 			return true
 		}
 
-		// 查找注入字段的值 BasicLit
-		var bl *ast.BasicLit
-
-		if ce.Ellipsis.IsValid() {
-			lastIdx := len(ce.Args) - 1
-			_, zapCall, _ := findEllipsisFieldCall(ce.Args[lastIdx], *fieldFlg)
-			if zapCall != nil && len(zapCall.Args) >= 2 {
-				if b, ok := zapCall.Args[1].(*ast.BasicLit); ok {
-					bl = b
-				}
-			}
-		} else {
-			idx := findExistingFieldIndex(ce, *fieldFlg)
-			if idx >= 0 {
-				call, ok := ce.Args[idx].(*ast.CallExpr)
-				if ok && len(call.Args) >= 2 {
-					if b, ok := call.Args[1].(*ast.BasicLit); ok {
-						bl = b
-					}
-				}
-			}
-		}
-
+		bl := findInjectedFieldLit(ce)
 		if bl == nil {
 			return true
 		}
@@ -581,11 +598,43 @@ func correctLineNumbers(output string, path string, modulePath string, baseDir s
 		return true
 	})
 
-	if len(edits) == 0 {
-		return output
+	return edits
+}
+
+// findInjectedFieldLit 在调用表达式中查找注入字段的值 BasicLit
+func findInjectedFieldLit(ce *ast.CallExpr) *ast.BasicLit {
+	if ce.Ellipsis.IsValid() {
+		lastIdx := len(ce.Args) - 1
+		_, zapCall, _ := findEllipsisFieldCall(ce.Args[lastIdx], *fieldFlg)
+
+		if zapCall != nil && len(zapCall.Args) >= 2 {
+			if b, ok := zapCall.Args[1].(*ast.BasicLit); ok {
+				return b
+			}
+		}
+
+		return nil
 	}
 
-	// 从文件尾部向头部应用替换, 保证前面的偏移量不被后面的替换影响
+	idx := findExistingFieldIndex(ce, *fieldFlg)
+	if idx < 0 {
+		return nil
+	}
+
+	call, ok := ce.Args[idx].(*ast.CallExpr)
+	if !ok || len(call.Args) < 2 {
+		return nil
+	}
+
+	if b, ok := call.Args[1].(*ast.BasicLit); ok {
+		return b
+	}
+
+	return nil
+}
+
+// applyLineEdits 从文件尾部向头部应用替换, 保证前面的偏移量不被后面的替换影响
+func applyLineEdits(output string, edits []lineEdit) string {
 	sort.Slice(edits, func(i, j int) bool {
 		return edits[i].offset > edits[j].offset
 	})
