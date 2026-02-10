@@ -3,7 +3,7 @@
 [![Go Version](https://img.shields.io/badge/Go-1.25.6+-blue.svg)](https://golang.org)
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
-一个用于 [zap](https://github.com/uber-go/zap) 日志库**针对需要混淆**源码注入工具。自动在 `zap.L().Info/Error/Debug/Warn/...` 调用处注入 `zap.String("fl", "file:line")` 字段，让每条日志都能精确追溯到源码位置。
+一个用于 [zap](https://github.com/uber-go/zap) 日志库**在使用[garble](https://github.com/burrowers/garble)混淆**源码注入工具。自动在 `zap.L().Info/Error/Debug/Warn/...` 调用处注入 `zap.String("fl", "file:line")` 字段，让每条日志都能精确追溯到源码位置，不会因为混淆后导致日志出处错位。
 
 ## 功能特性
 
