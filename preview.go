@@ -11,6 +11,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"sort"
 	"strings"
 )
@@ -29,6 +30,11 @@ func applyPatchIfModified(path string, modified bool, out string, modifiedLines 
 		// 写回文件
 		if err := os.WriteFile(path, []byte(out), 0600); err != nil {
 			return err
+		}
+
+		// 使用 gofmt 格式化写回的文件
+		if err := runGoFmt(path); err != nil {
+			fmt.Fprintf(os.Stderr, "warn: gofmt %s failed: %v\n", rel, err)
 		}
 	} else {
 		// dry-run: 打印每个注入点附近的片段，使用相对于 baseDir 的路径
@@ -83,4 +89,19 @@ func printPreview(out, path string, modifiedLines []int) {
 	}
 
 	fmt.Println("--- end preview ---")
+}
+
+// runGoFmt 对指定文件运行 gofmt 格式化。
+// 如果 gofmt 不在 PATH 中, 输出警告并返回 nil。
+func runGoFmt(path string) error {
+	gofmt, err := exec.LookPath("gofmt")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "warn: gofmt not found in PATH, skipping format")
+		return nil
+	}
+
+	cmd := exec.Command(gofmt, "-w", path)
+	cmd.Stderr = os.Stderr
+
+	return cmd.Run()
 }
