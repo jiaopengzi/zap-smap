@@ -22,20 +22,26 @@ import (
 	"fmt"
 	"go/token"
 	"os"
+	"runtime/debug"
 )
 
 var (
-	// Version 软件版本号，构建时通过 ldflags 注入
+	// Version 软件版本号, 构建时通过 ldflags 注入
 	Version = "dev"
 
-	// Commit 提交 Git Commit Hash，构建时通过 ldflags 注入
+	// Commit 提交 Git Commit Hash, 构建时通过 ldflags 注入
 	Commit = "unknown"
 
-	// BuildTime 构建时间，构建时通过 ldflags 注入
+	// BuildTime 构建时间, 构建时通过 ldflags 注入
 	BuildTime = "unknown"
 )
 
 func main() {
+	// 尝试使用 build info 填充版本信息(仅当 ldflags 未注入时生效)
+	if bi, ok := debug.ReadBuildInfo(); ok {
+		applyBuildInfo(bi)
+	}
+
 	// 解析命令行参数
 	flag.Parse()
 
@@ -77,5 +83,63 @@ func main() {
 			fmt.Fprintf(os.Stderr, "error: %v\n", err)
 			os.Exit(1)
 		}
+	}
+}
+
+// applyBuildInfo 根据 debug.BuildInfo 填充版本信息。
+// 优先保留通过 ldflags 已设置的值(非默认值), 只有在默认值时才使用 build info。
+func applyBuildInfo(bi *debug.BuildInfo) {
+	if bi == nil {
+		return
+	}
+
+	applyVersion(bi.Main.Version)
+	applyVCSSettings(bi.Settings)
+}
+
+// applyVersion 如果 Version 仍为默认值, 则使用 build info 中的版本
+func applyVersion(v string) {
+	if !isDefaultVersion(Version) {
+		return
+	}
+
+	if v != "" && v != "(devel)" {
+		Version = v
+	}
+}
+
+// isDefaultVersion 判断版本是否为默认值
+func isDefaultVersion(v string) bool {
+	return v == "dev" || v == ""
+}
+
+// isDefaultValue 判断值是否为默认值
+func isDefaultValue(v string) bool {
+	return v == "unknown" || v == ""
+}
+
+// applyVCSSettings 从 build settings 中提取 vcs.revision 和 vcs.time
+func applyVCSSettings(settings []debug.BuildSetting) {
+	for _, s := range settings {
+		switch s.Key {
+		case "vcs.revision":
+			applyCommit(s.Value)
+		case "vcs.time":
+			applyBuildTime(s.Value)
+		}
+	}
+}
+
+// applyCommit 如果 Commit 为默认值, 则使用给定值
+func applyCommit(v string) {
+	if isDefaultValue(Commit) && v != "" {
+		Commit = v
+	}
+}
+
+// applyBuildTime 如果 BuildTime 为默认值, 则使用给定值
+func applyBuildTime(v string) {
+	if isDefaultValue(BuildTime) && v != "" {
+		BuildTime = v
 	}
 }
